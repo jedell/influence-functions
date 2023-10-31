@@ -85,6 +85,26 @@ class EKFAC:
 
 small_model = torch.nn.Linear(10, 1)
 
+def convergence_not_reached():
+
+    return True
+
+def compute_eigenbasis(D, l):
+
+    return 
+
+def compute_scalings(D, l):
+
+    return
+
+def update_parameters(grad_mini, l):
+
+    return
+
+n = 32 # recompute eigenbasis after n minibatches
+lr = 0.01 # learning rate
+e = 0.01 # damping
+
 # https://arxiv.org/pdf/1806.03884.pdf
 def ekfac(model: PreTrainedModel, D_train: DataLoader):
 
@@ -93,4 +113,16 @@ def ekfac(model: PreTrainedModel, D_train: DataLoader):
         D = next(iter(D_train))
 
         # Do forward and backprop pass as needed to obtain h and δ
+        logits = model(D)
+        h = ...
+        delta = ...
 
+        for l in model.named_modules():
+            if i % n == 0: # Amortize eigendecomposition
+                compute_eigenbasis(D, l)
+            
+            compute_scalings(D, l)
+        
+            grad_mini = ... # E_{(x,y)} ∈ D [ ∇^(l)_θ (x, y) ]
+
+            update_parameters(grad_mini, l)
