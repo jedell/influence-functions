@@ -90,8 +90,17 @@ def convergence_not_reached():
     return True
 
 def compute_eigenbasis(D, l):
-
-    return 
+    hh_outer = torch.einsum('bi,bj->bij', D['h'][l], D['h'][l])
+    
+    delta_delta_outer = torch.einsum('bi,bj->bij', D['delta'][l], D['delta'][l])
+    
+    hh_outer_mean = hh_outer.mean(dim=0)
+    delta_delta_outer_mean = delta_delta_outer.mean(dim=0)
+    
+    S_A, U_A = torch.symeig(hh_outer_mean, eigenvectors=True)
+    S_B, U_B = torch.symeig(delta_delta_outer_mean, eigenvectors=True)
+    
+    return U_A, S_A, U_B, S_B
 
 def compute_scalings(D, l):
 
@@ -112,10 +121,22 @@ def ekfac(model: PreTrainedModel, D_train: DataLoader):
     while convergence_not_reached(): # TODO for looop??? what is convergence
         D = next(iter(D_train))
 
-        # Do forward and backprop pass as needed to obtain h and δ
+        # Forward pass to obtain h (inputs for a layer)
+        h = {}
+        for l, (name, module) in enumerate(model.named_modules()):
+            if isinstance(module, torch.nn.Linear):
+                h[name] = module.input
+
+        # Backward pass to obtain δ (the backpropagated gradient on activation a)
+        model.zero_grad()
         logits = model(D)
-        h = ...
-        delta = ...
+        loss = model.loss_function(logits, D)
+        loss.backward()
+
+        delta = {}
+        for l, (name, module) in enumerate(model.named_modules()):
+            if isinstance(module, torch.nn.Linear):
+                delta[name] = module.weight.grad
 
         for l in model.named_modules():
             if i % n == 0: # Amortize eigendecomposition
