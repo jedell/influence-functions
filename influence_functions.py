@@ -1,5 +1,6 @@
 import torch
-from torch.utils.data import DataLoader
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
 import time
 import datetime
 import numpy as np
@@ -83,7 +84,19 @@ class EKFAC:
             print(name)
 
 
-small_model = torch.nn.Linear(10, 1)
+class SimpleLinearModel(nn.Module):
+    def __init__(self):
+        super(SimpleLinearModel, self).__init__()
+        self.linear1 = nn.Linear(100, 50)
+        self.linear2 = nn.Linear(50, 10)
+        self.relu = nn.ReLU()
+
+    def forward(self, src):
+        output = self.relu(self.linear1(src))
+        output = self.linear2(output)
+        return output
+
+small_model = SimpleLinearModel()
 
 def convergence_not_reached():
 
@@ -114,29 +127,67 @@ n = 32 # recompute eigenbasis after n minibatches
 lr = 0.01 # learning rate
 e = 0.01 # damping
 
+# TODO its been right here all along, i just didnt understand it 
+# https://github.com/wiseodd/natural-gradients/blob/master/pytorch/ekfac.py#L59
+
+state = {}
+_fwd_handles = []
+_bwd_handles = []
+
+h_s = []
+gy_s = []
+
+def _save_input(module: nn.Module, i):
+    print("input:", module, i)
+    # return i[0]
+    h_s.append(i[0])
+    # state[module.__class__.__name__]['x'] = i[0]
+
+def _save_grad_output(module, grad_input, grad_output):
+    print("grad_output:", grad_output)
+    # state[module]['gy'] = grad_output[0] * grad_output[0].size(0)
+    gy_s.append(grad_output[0] * grad_output[0].size(0))
+
+# for name, param in small_model.named_parameters():
+#     print(name, param)
+#     exit()
+
+linear = nn.Linear(32, 10, True)
+
+for name, module in small_model.named_modules():
+    handle = module.register_forward_pre_hook(_save_input)
+    _fwd_handles.append(handle)
+    handle = module.register_full_backward_hook(_save_grad_output)
+    _bwd_handles.append(handle)
+
+    # can we get params during training loop model.parameters
+    # print(module.__dict__.keys())
+    # exit()
+    # params = [module.weight]
+    # if module.bias is not None:
+    #     params.append(module.bias)
+    # d = {'params': params, 'mod': module, 'layer_type': name}
+
 # https://arxiv.org/pdf/1806.03884.pdf
-def ekfac(model: PreTrainedModel, D_train: DataLoader):
+def ekfac(model, D_train: DataLoader, iterations=100):
 
-    i = 0
-    while convergence_not_reached(): # TODO for looop??? what is convergence
+    for i in range(iterations):
         D = next(iter(D_train))
-
+        X, Y = D
         # Forward pass to obtain h (inputs for a layer)
-        h = {}
-        for l, (name, module) in enumerate(model.named_modules()):
-            if isinstance(module, torch.nn.Linear):
-                h[name] = module.input
 
         # Backward pass to obtain δ (the backpropagated gradient on activation a)
-        model.zero_grad()
-        logits = model(D)
-        loss = model.loss_function(logits, D)
+        logits = model(X)
+        print(logits)
+        print("h vals:", h_s)
+
+        loss = nn.CrossEntropyLoss()(logits, Y)
+
         loss.backward()
 
-        delta = {}
-        for l, (name, module) in enumerate(model.named_modules()):
-            if isinstance(module, torch.nn.Linear):
-                delta[name] = module.weight.grad
+        print("gy vals:", gy_s)
+
+        model.zero_grad()
 
         for l in model.named_modules():
             if i % n == 0: # Amortize eigendecomposition
@@ -147,3 +198,11 @@ def ekfac(model: PreTrainedModel, D_train: DataLoader):
             grad_mini = ... # E_{(x,y)} ∈ D [ ∇^(l)_θ (x, y) ]
 
             update_parameters(grad_mini, l)
+
+train_data = torch.randn((100, 100)) 
+train_labels = torch.randint(0, 10, (100,))
+train_dataset = TensorDataset(train_data, train_labels)
+
+train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+
+ekfac(small_model, train_dataloader, 10)
