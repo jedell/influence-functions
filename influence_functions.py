@@ -134,19 +134,13 @@ state = {}
 _fwd_handles = []
 _bwd_handles = []
 
-h_s = []
-gy_s = []
-
 def _save_input(module: nn.Module, i):
-    print("input:", module, i)
-    # return i[0]
-    h_s.append(i[0])
-    # state[module.__class__.__name__]['x'] = i[0]
+    state[module]['x'] = i[0]
+    # h_s.append(i[0])
 
 def _save_grad_output(module, grad_input, grad_output):
-    print("grad_output:", grad_output)
-    # state[module]['gy'] = grad_output[0] * grad_output[0].size(0)
-    gy_s.append(grad_output[0] * grad_output[0].size(0))
+    state[module]['gy'] = grad_output[0] * grad_output[0].size(0)
+    # gy_s.append(grad_output[0] * grad_output[0].size(0))
 
 # for name, param in small_model.named_parameters():
 #     print(name, param)
@@ -155,6 +149,8 @@ def _save_grad_output(module, grad_input, grad_output):
 linear = nn.Linear(32, 10, True)
 
 for name, module in small_model.named_modules():
+    state[module] = {}
+
     handle = module.register_forward_pre_hook(_save_input)
     _fwd_handles.append(handle)
     handle = module.register_full_backward_hook(_save_grad_output)
@@ -178,14 +174,10 @@ def ekfac(model, D_train: DataLoader, iterations=100):
 
         # Backward pass to obtain δ (the backpropagated gradient on activation a)
         logits = model(X)
-        print(logits)
-        print("h vals:", h_s)
 
         loss = nn.CrossEntropyLoss()(logits, Y)
 
         loss.backward()
-
-        print("gy vals:", gy_s)
 
         model.zero_grad()
 
@@ -205,4 +197,17 @@ train_dataset = TensorDataset(train_data, train_labels)
 
 train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
-ekfac(small_model, train_dataloader, 10)
+# ekfac(small_model, train_dataloader, 10)
+
+# from nngeometry.nngeometry.object import PMatEKFAC
+# from nngeometry.nngeometry.metrics import FIM
+
+# G = FIM(
+#     model=small_model,
+#     loader=train_dataloader,
+#     representation=PMatEKFAC,
+#     n_output=10,
+#     variant='classif_logits',
+# )
+
+# print(G.trace())
