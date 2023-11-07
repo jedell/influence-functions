@@ -102,18 +102,52 @@ def convergence_not_reached():
 
     return True
 
-def compute_eigenbasis(D, l):
-    hh_outer = torch.einsum('bi,bj->bij', D['h'][l], D['h'][l])
-    
-    delta_delta_outer = torch.einsum('bi,bj->bij', D['delta'][l], D['delta'][l])
-    
-    hh_outer_mean = hh_outer.mean(dim=0)
-    delta_delta_outer_mean = delta_delta_outer.mean(dim=0)
-    
-    S_A, U_A = torch.symeig(hh_outer_mean, eigenvectors=True)
-    S_B, U_B = torch.symeig(delta_delta_outer_mean, eigenvectors=True)
-    
-    return U_A, S_A, U_B, S_B
+def compute_kfe(D, module: nn.Module, state):
+    layer_type = module._get_name()
+    x = state[module]['x']
+    gy = state[module]['gy']
+
+    print(module, x.shape, gy.shape)
+    print(layer_type)
+
+    if layer_type == 'Linear':
+        x = x.data.t()
+
+        if module.bias is not None:
+            ones = torch.ones_like(x[:1])
+            x = torch.cat([x, ones], dim=0)
+
+        xxt = torch.mm(x, x.t()) / float(x.shape[1])
+
+        Ex, state['kfe_x'] = torch.linalg.eigh(xxt,UPLO='U')
+
+        gy = gy.data.t()
+        state['num_locations'] = 1
+
+        ggt = torch.mm(gy, gy.t()) / float(gy.shape[1])
+        Eg, state['kfe_gy'] = torch.linalg.eigh(ggt, UPLO='U')
+        state['m2'] = Eg.unsqueeze(1) * Ex.unsqueeze(0) * state['num_locations']
+
+def apply_preconditioning(weight, bias, module, state, alpha=0.75, eps=0.1):
+    kfe_x = state['kfe_x']
+    kfe_gy = state['kfe_gy']
+    m2 = state['m2']
+    g = weight.grad.data
+    s = g.shape
+    bs = state[module]['x'].size(0)
+    if bias is not None:
+        gb = bias.grad.data
+        g = torch.cat([g, gb.view(gb.shape[0], 1)], dim=1)
+    g_kfe = torch.mm(torch.mm(kfe_gy.t(), g), kfe_x)
+    m2.mul_(alpha).add_((1. - alpha) * bs, g_kfe**2)
+    g_nat_kfe = g_kfe / (m2 + eps)
+    g_nat = torch.mm(torch.mm(kfe_gy, g_nat_kfe), kfe_x.t())
+    if bias is not None:
+        gb = g_nat[:, -1].contiguous().view(*bias.shape)
+        bias.grad.data = gb
+        g_nat = g_nat[:, :-1]
+    g_nat = g_nat.contiguous().view(*s)
+    weight.grad.data = g_nat
 
 def compute_scalings(D, l):
 
@@ -148,13 +182,17 @@ def _save_grad_output(module, grad_input, grad_output):
 
 linear = nn.Linear(32, 10, True)
 
-for name, module in small_model.named_modules():
+for name, module in small_model.named_children():
     state[module] = {}
+    state[module]['name'] = name
 
     handle = module.register_forward_pre_hook(_save_input)
     _fwd_handles.append(handle)
     handle = module.register_full_backward_hook(_save_grad_output)
     _bwd_handles.append(handle)
+        
+    if name == '':
+        pass
 
     # can we get params during training loop model.parameters
     # print(module.__dict__.keys())
@@ -164,8 +202,23 @@ for name, module in small_model.named_modules():
     #     params.append(module.bias)
     # d = {'params': params, 'mod': module, 'layer_type': name}
 
+print(state)
+
+def compute_eigenbasis():
+
+    return
+
 # https://arxiv.org/pdf/1806.03884.pdf
-def ekfac(model, D_train: DataLoader, iterations=100):
+def ekfac(model: nn.Module, D_train: DataLoader, iterations=100):
+
+    A = []  # KFAC A
+    G = []  # KFAC G
+
+    for name, param in model.named_parameters():
+        print(name, param)
+        # for Wi in model:
+        #     A.append(torch.zeros(Wi.size(1)))
+        #     G.append(torch.zeros(Wi.size(0)))
 
     for i in range(iterations):
         D = next(iter(D_train))
@@ -179,17 +232,13 @@ def ekfac(model, D_train: DataLoader, iterations=100):
 
         loss.backward()
 
+        # step
+        for name, module in model.named_children():
+            compute_eigenbasis()
+            
+
         model.zero_grad()
 
-        for l in model.named_modules():
-            if i % n == 0: # Amortize eigendecomposition
-                compute_eigenbasis(D, l)
-            
-            compute_scalings(D, l)
-        
-            grad_mini = ... # E_{(x,y)} ∈ D [ ∇^(l)_θ (x, y) ]
-
-            update_parameters(grad_mini, l)
 
 train_data = torch.randn((100, 100)) 
 train_labels = torch.randint(0, 10, (100,))
@@ -197,7 +246,18 @@ train_dataset = TensorDataset(train_data, train_labels)
 
 train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 
-# ekfac(small_model, train_dataloader, 10)
+def get_kfac_blocks(loader):
+
+
+
+    return
+
+eigenvectors = {}
+diagonals = {}
+
+kfac_blocks = get_kfac_blocks(train_dataloader)
+
+ekfac(small_model, train_dataloader, 10)
 
 # from nngeometry.nngeometry.object import PMatEKFAC
 # from nngeometry.nngeometry.metrics import FIM
@@ -207,7 +267,25 @@ train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 #     loader=train_dataloader,
 #     representation=PMatEKFAC,
 #     n_output=10,
-#     variant='classif_logits',
+#     # variant='classif_logits',
 # )
 
 # print(G.trace())
+
+# if len(list(module.parameters())) == 2:
+#     weight, bias = module.parameters()
+# else:
+#     weight = list(module.parameters())[0]
+#     bias = None
+# curr_state = state
+
+# if i % n == 0: # Amortize eigendecomposition
+#     compute_kfe(D, module, curr_state)
+
+# # compute_scalings(D, l)
+
+# apply_preconditioning(weight, bias, module, curr_state)
+
+# # grad_mini = ... # E_{(x,y)} ∈ D [ ∇^(l)_θ (x, y) ]
+
+# # update_parameters(grad_mini, module)
