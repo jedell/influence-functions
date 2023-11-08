@@ -60,8 +60,13 @@ G = FIM(
     # variant='classif_logits',
 )
 
+# This is FIM approx.
+print(G.get_dense_tensor().size())
+print(G.get_diag().shape)
+
 v = PVector.from_model(small_model)
 
+# Compute matrix vector product for G and vector v
 Fv = G.mv(v)
 
 print(Fv.vector_repr.shape)
