@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import time
 import datetime
@@ -47,7 +48,7 @@ train_data = torch.randn((100, 100))
 train_labels = torch.randint(0, 10, (100,))
 train_dataset = TensorDataset(train_data, train_labels)
 
-train_dataloader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
 from nngeometry.object import PMatEKFAC, PMatDiag, PVector
 from nngeometry.metrics import FIM
@@ -64,9 +65,39 @@ G = FIM(
 print(G.get_dense_tensor().size())
 print(G.get_diag().shape)
 
-v = PVector.from_model(small_model)
+test_point = torch.randn((1, 100)) 
+test_label = torch.randint(0, 10, (1,))
 
-# Compute matrix vector product for G and vector v
-Fv = G.mv(v)
+small_model.zero_grad()
+output = small_model(test_point)
+loss = F.cross_entropy(output, test_label)
+loss.backward()
 
-print(Fv.vector_repr.shape)
+grad_test_point = []
+for param in small_model.parameters():
+    # flatten
+    grad_test_point.append(param.grad.view(-1))
+grad_test_point = torch.cat(grad_test_point)
+
+print("shape:", grad_test_point.shape)
+
+v_q = torch.inverse(G.get_dense_tensor()) @ grad_test_point
+
+print(v_q)
+
+influence_values = []
+for data, label in train_dataloader:
+    small_model.zero_grad()
+    output = small_model(data)
+    loss = F.cross_entropy(output, label)
+    loss.backward()
+
+    grad_train_point = []
+    for param in small_model.parameters():
+        # flatten
+        grad_train_point.append(param.grad.view(-1))
+    grad_train_point = torch.cat(grad_train_point)
+
+    influence_values.append(torch.dot(grad_train_point, v_q).item())
+
+print(len(influence_values))
