@@ -24,7 +24,7 @@ class SentencePairDataset(Dataset):
         prompt_sentence, target_sentence = self.sentence_pairs[idx]
         prompt_encoding = self.tokenizer.encode_plus(prompt_sentence, return_tensors='pt', add_special_tokens=True, padding='max_length', truncation=True, max_length=512)
         target_encoding = self.tokenizer.encode_plus(target_sentence, return_tensors='pt', add_special_tokens=True, padding='max_length', truncation=True, max_length=512)
-        return prompt_encoding, target_encoding
+        return prompt_encoding['input_ids'].squeeze(0).float(), target_encoding['input_ids'].squeeze(0).float()
 
 # Create training and test datasets
 train_dataset = SentencePairDataset(train_sentence_pairs, tokenizer)
