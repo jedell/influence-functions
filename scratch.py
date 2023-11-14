@@ -28,7 +28,10 @@ def forward_hook_fn(module, input, output):
     if isinstance(module, MLP):
         print("mlp in", input[0].shape)
         print("mlp out", output[0].shape)
-    layer_inputs[module] = input[0]
+    layer_inputs[module] = torch.cat([
+            input[0],
+            torch.ones((input[0].shape[0], input[0].shape[1], 1)).to(input[0].device),
+       ], dim=-1).clone()
 
 # 2. get grad_loss, gradients of loss wrt output of linear transformation W_l a_l-1
 #    using a backward hook on the linear layer that saves the gradient wrt the linear layer's output
@@ -45,8 +48,8 @@ kfac_grad_covs = []
 
 for name, module in model.named_modules():
     if isinstance(module, nn.Linear):
-        module.register_forward_pre_hook(forward_hook_fn)
-        module.register_backward_hook(back_hook_fn)
+        module.register_forward_hook(forward_hook_fn)
+        module.register_full_backward_hook(back_hook_fn)
 
         kfac_input_covs.append(
             torch.zeros((module.weight.shape[1] + 1, module.weight.shape[1] + 1)).to(device)
@@ -55,13 +58,8 @@ for name, module in model.named_modules():
         kfac_grad_covs.append(
             torch.zeros((module.weight.shape[0], module.weight.shape[0])).to(device)
         )
-    if isinstance(module, MLP):
-        module.register_forward_pre_hook(forward_hook_fn)
-        module.register_full_backward_hook(back_hook_fn)
-
-        pass
-
-
+grads = [[] for _ in range(len([module for _, module in model.named_modules() if isinstance(module, nn.Linear)]))]
+tot = 0
 for X, Y in train_dataset:
 
     model.zero_grad()
@@ -75,17 +73,34 @@ for X, Y in train_dataset:
 
     logits, loss = model(x_ids, y_ids)
 
-    loss.backward()
-
     # for each linear/mlp block, get a_l-1
-    for i, named_modules in enumerate(model.named_modules()):
+    i = 0
+    for named_modules in model.named_modules():
         name, module = named_modules
-        if isinstance(module, nn.Linear) or isinstance(module, MLP):
+        if isinstance(module, nn.Linear):
             a_l_1 = layer_inputs[module]
             input_covs = torch.einsum("...ti,...tj->tij", a_l_1, a_l_1)
             kfac_input_covs[i] += input_covs.mean(dim=0)
+            i+=1
 
-            # grad_loss = layer_grads[module]
+    loss.backward()
 
-
+    # grad_loss = layer_grads[module]
+    i = 0
+    for named_modules in model.named_modules():
+        name, module = named_modules
+        if isinstance(module, nn.Linear):
+            d_s_l = layer_grads[module]
+            grad_cov = torch.einsum("...ti,...tj->tij", d_s_l, d_s_l)
+            kfac_grad_covs[i] += grad_cov.mean(dim=0)
             
+            # gradient of the loss wrt the weights
+            w_grad = module.weight.grad
+            b_grad = module.bias.grad.unsqueeze(-1)
+            full_grad = torch.cat([w_grad, b_grad], dim=-1)
+            grads[i].append(full_grad)
+
+    tot+=1
+    
+kfac_input_covs = [A / tot for A in kfac_input_covs]
+kfac_grad_covs = [S / tot for S in kfac_grad_covs]
