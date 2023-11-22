@@ -163,3 +163,4 @@ tensors.pt
 torch-influence
 nngeometry
 *.tex
+*.json

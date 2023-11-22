@@ -55,7 +55,7 @@ class CharPredictDataset(Dataset):
 # train_dataset = SentencePairDataset(train_sentence_pairs, tokenizer)
 # test_dataset = SentencePairDataset(test_sentence_pairs, tokenizer)
 
-seq_length = 5
+seq_length = 10
 dataset_length = 200
 
 train_dataset = CharPredictDataset(dataset_length, seq_length)

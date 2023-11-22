@@ -14,13 +14,13 @@ torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 
-n_embd = 4
-n_heads = 1
-d_mlp = 8
+n_embd = 16
+n_heads = 2
+d_mlp = 32
 n_layers = 2
 vocab_size = 128
 
-config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, vocab_size=vocab_size, block_size=d_mlp)
+config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp, vocab_size=128)
 
 model = GPT(config=config).to(device)
 
@@ -90,9 +90,7 @@ def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
         # for each linear/mlp block, get a_l-1
         for i, module in enumerate(linear_layers):
             a_l_1 = layer_inputs[module]
-            print("a_l_1", a_l_1.shape)
             input_covs = torch.einsum("...ti,...tj->tij", a_l_1, a_l_1)
-            print("input_covs", input_covs.shape)
             kfac_input_covs[i] += input_covs.mean(dim=0)
 
         loss.backward()
@@ -118,7 +116,7 @@ def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
 
         tot+=1
 
-
+    # eq 16
     kfac_input_covs = [A / tot for A in kfac_input_covs]
     kfac_grad_covs = [S / tot for S in kfac_grad_covs]
 
@@ -173,13 +171,20 @@ def compute_lambda_ii(train_grads, q_a, q_s):
     lambda_ii_avg = squared_projections_sum / n_examples
     return lambda_ii_avg
 
-def compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads, damping=0.001):
+def compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, mod_grads, damping=0.001):
     logging.info(f"Computing IHVP for {model._get_name()} with damping factor {damping}.")
     
+    # TODO equation 31 from https://arxiv.org/pdf/2308.03296.pdf
     ihvp = []
-    for i in range(len(computed_grads)):
-        V = computed_grads[i]
+    ihvp_tokenwise = []
+    print("linear_layer", len(linear_layers))
+    print("modGrads", len(mod_grads[0]))
+    print(mod_grads[0][0].shape) # pretty sure this is [size of gradient of the loss wrt the weights, seq_len]
+    for i in range(len(mod_grads)):
+        V = mod_grads[i]
+        print(len(V))
         stacked = torch.stack(V)
+        print(stacked.shape)
 
         q_a, _, q_a_t = torch.svd(kfac_input_covs[i])
         q_s, _, q_s_t = torch.svd(kfac_grad_covs[i])
@@ -192,18 +197,31 @@ def compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_g
         intermediate_result = torch.einsum("bij,jk->bik", stacked, q_a_t)
         intermediate_result = torch.einsum("ji,bik->bjk", q_s, intermediate_result)
         result = intermediate_result / ekfacDiag_damped_inv.unsqueeze(0)
+        print("result", result.shape)
         ihvp_component = torch.einsum("bij,jk->bik", result, q_a)
         ihvp_component = torch.einsum("ji,bik->bjk", q_s_t, ihvp_component)
         # flattening the result except for the batch dimension
+        print('ihvp_component', ihvp_component.shape)
+        ihvp_tokenwise.append(ihvp_component)
         ihvp_component = einops.rearrange(ihvp_component, "b j k -> b (j k)")
+        print(ihvp_component.shape)
+
         ihvp.append(ihvp_component)
 
     logging.info(f'Finished computing IHVP.')
-    return torch.cat(ihvp, dim=-1)
+    return torch.cat(ihvp, dim=-1), ihvp_tokenwise
 
 
 model_name = model._get_name()
 num_params = model.get_num_params()
+if num_params >= 10**9:
+    num_params_str = f"{num_params / 10**9}B"
+elif num_params >= 10**6:
+    num_params_str = f"{num_params / 10**6}M"
+elif num_params >= 10**3:
+    num_params_str = f"{num_params / 10**3}K"
+else:
+    num_params_str = str(num_params)
 
 if os.path.exists(f'{model_name}_kfac_input_covs_{num_params}.pt'):
     kfac_input_covs = torch.load(f'{model_name}_kfac_input_covs_{num_params}.pt')
@@ -224,17 +242,13 @@ else:
 
 if os.path.exists(f'{model_name}_ihvp_{num_params}.pt'):
     ihvp = torch.load(f'{model_name}_ihvp_{num_params}.pt')
+    ihvp_tokenwise = torch.load(f'{model_name}_ihvp_tokenwise_{num_params}.pt')
 else:
-    ihvp = compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads)
+    ihvp, ihvp_tokenwise  = compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads)
     torch.save(ihvp, f'{model_name}_ihvp_{num_params}.pt')
+    torch.save(ihvp_tokenwise, f'{model_name}_ihvp_tokenwise_{num_params}.pt')
 
 # above can be done once for model finetuned on specific dataset
-# 1. Finetune model on a dataset
-# 2. Select subset of data to calculate grads and ihvp
-# 3. Store ihvp
-# 4. run "inference" on input, obtain completion
-# 5. consider input and completion as test point and calculate influence for data subset
-# 6. display in cool way
 
 # 5. for each test point:
 # get gradient of test point wrt loss?
@@ -246,34 +260,105 @@ topk = 5
 
 all_top_training_samples = []
 all_top_influences = []
+all_top_token_influences = []
 
 logging.info(f'Calculating influences for query data.')
 
 for query in test_dataloader:
-
+    print(ihvp.shape)
+    for l in ihvp_tokenwise:
+        print("ihvp_token", l.shape)
+    grads = compute_grads(model, [query])
+    print("grads[0]", grads[0][0].view(-1).shape)
+    tokenwise_query_grads = grads
+    for l in tokenwise_query_grads:
+        print("token_query_grad", l[0].shape)
     query_grad = torch.cat(
-        [q[0].view(-1) for q in compute_grads(model, [query])]
+        [q[0].view(-1) for q in grads]
     )
-
+    print("query_grad", query_grad.shape)
     top_influences = -1 * torch.einsum("ij,j->i", ihvp, query_grad)
+    print("top_influences", top_influences.shape)
+
+    layer_token_influences = []
+    seq_len = ihvp_tokenwise[-1].shape[-1]
+    print("seq_len", seq_len)
+    for l, g in zip(ihvp_tokenwise, tokenwise_query_grads):
+        # some ihvp layer grads have more tokens, intermediate linear layers from mlp
+        # TODO investigate this
+        if l.shape[-1] == seq_len:
+            token_influence = torch.einsum("ijk,jk->ik", l, g[0])
+            print("layer_token_influences", token_influence.shape)
+            layer_token_influences.append(token_influence)
+    # print(ihvp_tokenwise)
+    # print(tokenwise_query_grads)
+    print(len(layer_token_influences))
+    for ti in layer_token_influences:
+        print(ti.shape)
+    token_influences = torch.sum(torch.stack(layer_token_influences), dim=0)
+    print("final", token_influences)
+    # print(token_influences)
 
     top_influences, top_samples = torch.topk(top_influences, topk)
+    print(top_samples)
     all_top_training_samples.append(top_samples)
     all_top_influences.append(top_influences)
+
+    top_token_influences = token_influences[top_samples]
+    all_top_token_influences.append(top_token_influences)
+    print(top_token_influences)
 
 def decode(token_ids):
     try:
         return "".join([chr(i) for i in token_ids])
     except:
         return chr(token_ids)
-    
-for i, (top_samples, top_influences) in enumerate(
-        zip(all_top_training_samples, all_top_influences)
+
+# TODO ensure we are doing this per token when using real data 
+for i, (top_samples, top_influences, top_token_influences) in enumerate(
+        zip(all_top_training_samples, all_top_influences, all_top_token_influences)
     ):
         print(f"Query: {decode(test_dataset[i][0]['input_ids'])[0]}{decode(test_dataset[i][1]['input_ids'])}")
         print(f"Top {topk} training samples and their influences:")
-        for s, i in zip(top_samples, top_influences):
+        for s, i, tok_inf in zip(top_samples, top_influences, top_token_influences):
             s = s.item()
+            sample = f"{decode(train_dataset[s][0]['input_ids'])[0]}{decode(train_dataset[s][1]['input_ids'])}"
             print(
-                f"{decode(train_dataset[s][0]['input_ids'])[0]}{decode(train_dataset[s][1]['input_ids'])} Influence: {i}"
+                f"{sample} Influence: {i}"
             )
+            for char, influence in zip(sample, tok_inf):
+                print(f"{char}, {influence}")
+
+# import json
+
+# data = []
+# for i, (top_samples, top_influences, top_token_influences) in enumerate(
+#         zip(all_top_training_samples, all_top_influences, all_top_token_influences)
+#     ):
+#     query = f"{decode(test_dataset[i][0]['input_ids'])[0]}{decode(test_dataset[i][1]['input_ids'])}"
+#     influences = []
+#     for s, i, tok_inf in zip(top_samples, top_influences, top_token_influences):
+#         s = s.item()
+#         sample = f"{decode(train_dataset[s][0]['input_ids'])[0]}{decode(train_dataset[s][1]['input_ids'])}"
+#         influences.append({
+#             'sample': sample,
+#             'influence': i.item(),
+#             'token_influence': tok_inf.tolist()
+#         })
+#     data.append({
+#         'query': query,
+#         'influences': influences
+#     })
+
+# with open('data.json', 'w') as f:
+#     json.dump(data, f)
+
+# TODO DUMP
+# 1. Finetune model on a dataset
+# 2. Select subset of data to calculate grads and ihvp
+# 3. Store ihvp
+# 4. run "inference" on input, obtain completion
+# 5. consider input and completion as test point and calculate influence for data subset
+# 6. display in cool way
+
+# Figure out how to serve this
