@@ -4,11 +4,11 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import einops
 
-from model import GPT, GPTConfig, MLP
-from dataset import train_dataset, test_dataset, tokenizer
+from model import GPT, GPTConfig
+from dataset import train_dataset, test_dataset, vocab_size
 
 torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -18,9 +18,11 @@ n_embd = 16
 n_heads = 2
 d_mlp = 32
 n_layers = 2
-vocab_size = 128
+vocab_size = vocab_size
 
-config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp) #, vocab_size=128)
+logging.info(f"GPT Configuration: n_embd={n_embd}, n_heads={n_heads}, d_mlp={d_mlp}, n_layers={n_layers}, vocab_size={vocab_size}")
+
+config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp, vocab_size=vocab_size)
 
 model = GPT(config=config).to(device)
 
@@ -47,30 +49,31 @@ def back_hook_fn(module, grad_input, grad_output):
         layer_grads[module] = grad_output[0].clone().detach()
 
 linear_layers = []
-for _, module in model.named_modules():
-    if isinstance(module, nn.Linear):
-        # grab linear layers everytime
+for name, module in model.named_modules():
+    if isinstance(module, nn.Linear) and 'mlp' in name:
+        # grab linear layers that are children of MLP
+        # TODO adjust for hf gpt2 impl
         linear_layers.append(module)
 
-linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
+# linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
+logging.info(f"MLP Linear layers: {len(linear_layers)}")
 
 def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
     logging.info(f'Computing EKFAC factors for {model._get_name()} - Dataset len: {len(train_dataset.dataset)}')
     kfac_input_covs = []
     kfac_grad_covs = []
 
-    for _, module in model.named_modules():
-        if isinstance(module, nn.Linear):
-            module.register_forward_pre_hook(forward_hook_fn)
-            module.register_full_backward_hook(back_hook_fn)
+    for module in linear_layers:
+        module.register_forward_pre_hook(forward_hook_fn)
+        module.register_full_backward_hook(back_hook_fn)
 
-            kfac_input_covs.append(
-                torch.zeros((module.weight.shape[1] + 1, module.weight.shape[1] + 1)).to(device)
-            )
+        kfac_input_covs.append(
+            torch.zeros((module.weight.shape[1] + 1, module.weight.shape[1] + 1)).to(device)
+        )
 
-            kfac_grad_covs.append(
-                torch.zeros((module.weight.shape[0], module.weight.shape[0])).to(device)
-            )
+        kfac_grad_covs.append(
+            torch.zeros((module.weight.shape[0], module.weight.shape[0])).to(device)
+        )
 
     grads = [[] for _ in range(len(linear_layers))]
     tot = 0
@@ -93,7 +96,7 @@ def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
             input_covs = torch.einsum("...ti,...tj->tij", a_l_1, a_l_1)
             kfac_input_covs[i] += input_covs.mean(dim=0)
 
-        loss.backward()
+        loss.backward() 
 
         # grad_loss = layer_grads[module]
         for i, module in enumerate(linear_layers):
@@ -237,6 +240,8 @@ else:
 # get gradient of test point wrt loss?
 # calculate influence with ihvp and test_grad
 # sample topk
+
+exit()
 
 topk = 5
 
