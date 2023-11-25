@@ -51,6 +51,44 @@ class CharPredictDataset(Dataset):
         target_mask = torch.ones_like(target)
         return {'input_ids': prompt, 'attention_mask': prompt_mask}, {'input_ids': target, 'attention_mask': target_mask}
 
+
+# https://huggingface.co/datasets/Skylion007/openwebtext
+from datasets import load_dataset
+
+# dataset = load_dataset("Skylion007/openwebtext")
+
+class OpenWebTextDataset(Dataset):
+    def __init__(self, split, tokenizer, block_size=1024):
+        assert split in {'train', 'test'}
+        self.split = split
+        self.block_size = block_size
+        self.tokenizer = tokenizer
+        self.dataset = load_dataset("Skylion007/openwebtext", split=split)
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def get_vocab_size(self):
+        return self.tokenizer.vocab_size
+
+    def get_block_size(self):
+        return self.block_size
+
+    def __getitem__(self, idx):
+        text = self.dataset[idx]['text']
+        encoding = self.tokenizer.encode_plus(text, return_tensors='pt', add_special_tokens=True, padding='max_length', truncation=True, max_length=self.block_size)
+        input_ids = encoding['input_ids'].squeeze()
+        attention_mask = encoding['attention_mask'].squeeze()
+
+        # Shift the input_ids and attention_mask to the right and pad
+        labels = input_ids.clone()
+        labels[:-1] = input_ids[1:]
+        labels[-1] = self.tokenizer.pad_token_id
+        attention_mask[:-1] = attention_mask[1:]
+        attention_mask[-1] = 0
+
+        return {'input_ids': input_ids, 'attention_mask': attention_mask, 'labels': labels}
+
 # Create training and test datasets
 train_dataset = SentencePairDataset(train_sentence_pairs, tokenizer)
 test_dataset = SentencePairDataset(test_sentence_pairs, tokenizer)
