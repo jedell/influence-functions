@@ -52,20 +52,20 @@ class CharPredictDataset(Dataset):
         return {'input_ids': prompt, 'attention_mask': prompt_mask}, {'input_ids': target, 'attention_mask': target_mask}
 
 # Create training and test datasets
-# train_dataset = SentencePairDataset(train_sentence_pairs, tokenizer)
-# test_dataset = SentencePairDataset(test_sentence_pairs, tokenizer)
+train_dataset = SentencePairDataset(train_sentence_pairs, tokenizer)
+test_dataset = SentencePairDataset(test_sentence_pairs, tokenizer)
 
 seq_length = 10
 dataset_length = 200
 
-train_dataset = CharPredictDataset(dataset_length, seq_length)
-test_dataset = CharPredictDataset(dataset_length, seq_length)
+# train_dataset = CharPredictDataset(dataset_length, seq_length)
+# test_dataset = CharPredictDataset(dataset_length, seq_length)
 
 if __name__ == "__main__":
     print(len(train_dataset))
     x, y = next(iter(train_dataset))
-    print(x)
-    print(y)
+    print(x['input_ids'].shape)
+    print(y['input_ids'].shape)
     print(train_dataset.data)
     for X, Y in enumerate(train_dataset):
         print(X, Y)

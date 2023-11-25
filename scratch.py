@@ -20,7 +20,7 @@ d_mlp = 32
 n_layers = 2
 vocab_size = 128
 
-config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp, vocab_size=128)
+config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp) #, vocab_size=128)
 
 model = GPT(config=config).to(device)
 
@@ -30,7 +30,6 @@ test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 # 1. get a_l-1, use forward hook to save input to a layer l during the forward pass
 layer_inputs = {}
 
-# TODO something going on with the shapes
 def forward_hook_fn(module, input):
     if isinstance(module, nn.Linear):
         layer_inputs[module] = torch.cat([
@@ -53,13 +52,14 @@ for _, module in model.named_modules():
         # grab linear layers everytime
         linear_layers.append(module)
 
+linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
+
 def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
     logging.info(f'Computing EKFAC factors for {model._get_name()} - Dataset len: {len(train_dataset.dataset)}')
     kfac_input_covs = []
     kfac_grad_covs = []
 
     for _, module in model.named_modules():
-        # TODO register miniGPT MLP, first linear layer???
         if isinstance(module, nn.Linear):
             module.register_forward_pre_hook(forward_hook_fn)
             module.register_full_backward_hook(back_hook_fn)
@@ -81,9 +81,9 @@ def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
         x_ids = X['input_ids'].to(device)
         y_ids = Y['input_ids'].to(device)
 
-        if len(x_ids.shape) == 1:
-            x_ids = x_ids.unsqueeze(0)
-            y_ids = y_ids.unsqueeze(0)
+        if len(x_ids.shape) == 3:
+            x_ids = x_ids.squeeze(1)
+            y_ids = y_ids.squeeze(1)
 
         logits, loss = model(x_ids, y_ids)
 
@@ -138,9 +138,9 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
         x_ids = X['input_ids'].to(device)
         y_ids = Y['input_ids'].to(device)
 
-        if len(x_ids.shape) == 1:
-            x_ids = x_ids.unsqueeze(0)
-            y_ids = y_ids.unsqueeze(0)
+        if len(x_ids.shape) == 3:
+            x_ids = x_ids.squeeze(1)
+            y_ids = y_ids.squeeze(1)
 
         logits, loss = model(x_ids, y_ids)
 
@@ -160,7 +160,7 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
     return grads
 
 # 4. compute ekfac inverse hessian vector product
-
+# eq 20
 def compute_lambda_ii(train_grads, q_a, q_s):
     n_examples = len(train_grads)
     squared_projections_sum = 0.0
@@ -171,40 +171,31 @@ def compute_lambda_ii(train_grads, q_a, q_s):
     lambda_ii_avg = squared_projections_sum / n_examples
     return lambda_ii_avg
 
-def compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, mod_grads, damping=0.001):
+def compute_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, mod_grads, damping=0.001):
     logging.info(f"Computing IHVP for {model._get_name()} with damping factor {damping}.")
     
     # TODO equation 31 from https://arxiv.org/pdf/2308.03296.pdf
     ihvp = []
     ihvp_tokenwise = []
-    print("linear_layer", len(linear_layers))
-    print("modGrads", len(mod_grads[0]))
-    print(mod_grads[0][0].shape) # pretty sure this is [size of gradient of the loss wrt the weights, seq_len]
     for i in range(len(mod_grads)):
-        V = mod_grads[i]
-        print(len(V))
-        stacked = torch.stack(V)
-        print(stacked.shape)
+        V = torch.stack(mod_grads[i])
 
+        # eigendecompositions for eq 18
         q_a, _, q_a_t = torch.svd(kfac_input_covs[i])
         q_s, _, q_s_t = torch.svd(kfac_grad_covs[i])
 
         lambda_ii = compute_lambda_ii(pseudo_grads[i], q_a, q_s)
-        ekfacDiag_damped_inv = 1.0 / (lambda_ii + damping)
-        ekfacDiag_damped_inv = ekfacDiag_damped_inv.reshape(
-            (stacked.shape[-2], stacked.shape[-1])
+        ekfac_diag_damped_inv = 1.0 / (lambda_ii + damping)
+        ekfac_diag_damped_inv = ekfac_diag_damped_inv.reshape(
+            (V.shape[-2], V.shape[-1])
         )
-        intermediate_result = torch.einsum("bij,jk->bik", stacked, q_a_t)
+        intermediate_result = torch.einsum("bij,jk->bik", V, q_a_t)
         intermediate_result = torch.einsum("ji,bik->bjk", q_s, intermediate_result)
-        result = intermediate_result / ekfacDiag_damped_inv.unsqueeze(0)
-        print("result", result.shape)
+        result = intermediate_result / ekfac_diag_damped_inv.unsqueeze(0)
         ihvp_component = torch.einsum("bij,jk->bik", result, q_a)
         ihvp_component = torch.einsum("ji,bik->bjk", q_s_t, ihvp_component)
-        # flattening the result except for the batch dimension
-        print('ihvp_component', ihvp_component.shape)
         ihvp_tokenwise.append(ihvp_component)
         ihvp_component = einops.rearrange(ihvp_component, "b j k -> b (j k)")
-        print(ihvp_component.shape)
 
         ihvp.append(ihvp_component)
 
@@ -213,15 +204,7 @@ def compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, mod_grads,
 
 
 model_name = model._get_name()
-num_params = model.get_num_params()
-if num_params >= 10**9:
-    num_params_str = f"{num_params / 10**9}B"
-elif num_params >= 10**6:
-    num_params_str = f"{num_params / 10**6}M"
-elif num_params >= 10**3:
-    num_params_str = f"{num_params / 10**3}K"
-else:
-    num_params_str = str(num_params)
+num_params = "%.2fM" % (model.get_num_params()/1e6,)
 
 if os.path.exists(f'{model_name}_kfac_input_covs_{num_params}.pt'):
     kfac_input_covs = torch.load(f'{model_name}_kfac_input_covs_{num_params}.pt')
@@ -244,7 +227,7 @@ if os.path.exists(f'{model_name}_ihvp_{num_params}.pt'):
     ihvp = torch.load(f'{model_name}_ihvp_{num_params}.pt')
     ihvp_tokenwise = torch.load(f'{model_name}_ihvp_tokenwise_{num_params}.pt')
 else:
-    ihvp, ihvp_tokenwise  = compute_ekfac_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads)
+    ihvp, ihvp_tokenwise  = compute_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads)
     torch.save(ihvp, f'{model_name}_ihvp_{num_params}.pt')
     torch.save(ihvp_tokenwise, f'{model_name}_ihvp_tokenwise_{num_params}.pt')
 
@@ -254,7 +237,6 @@ else:
 # get gradient of test point wrt loss?
 # calculate influence with ihvp and test_grad
 # sample topk
-# profit???
 
 topk = 5
 
@@ -265,48 +247,32 @@ all_top_token_influences = []
 logging.info(f'Calculating influences for query data.')
 
 for query in test_dataloader:
-    print(ihvp.shape)
-    for l in ihvp_tokenwise:
-        print("ihvp_token", l.shape)
+
     grads = compute_grads(model, [query])
-    print("grads[0]", grads[0][0].view(-1).shape)
     tokenwise_query_grads = grads
-    for l in tokenwise_query_grads:
-        print("token_query_grad", l[0].shape)
+
     query_grad = torch.cat(
         [q[0].view(-1) for q in grads]
     )
-    print("query_grad", query_grad.shape)
     top_influences = -1 * torch.einsum("ij,j->i", ihvp, query_grad)
-    print("top_influences", top_influences.shape)
 
     layer_token_influences = []
     seq_len = ihvp_tokenwise[-1].shape[-1]
-    print("seq_len", seq_len)
     for l, g in zip(ihvp_tokenwise, tokenwise_query_grads):
         # some ihvp layer grads have more tokens, intermediate linear layers from mlp
-        # TODO investigate this
+        # TODO what do we do
         if l.shape[-1] == seq_len:
             token_influence = torch.einsum("ijk,jk->ik", l, g[0])
-            print("layer_token_influences", token_influence.shape)
             layer_token_influences.append(token_influence)
-    # print(ihvp_tokenwise)
-    # print(tokenwise_query_grads)
-    print(len(layer_token_influences))
-    for ti in layer_token_influences:
-        print(ti.shape)
+
     token_influences = torch.sum(torch.stack(layer_token_influences), dim=0)
-    print("final", token_influences)
-    # print(token_influences)
 
     top_influences, top_samples = torch.topk(top_influences, topk)
-    print(top_samples)
     all_top_training_samples.append(top_samples)
     all_top_influences.append(top_influences)
 
     top_token_influences = token_influences[top_samples]
     all_top_token_influences.append(top_token_influences)
-    print(top_token_influences)
 
 def decode(token_ids):
     try:
