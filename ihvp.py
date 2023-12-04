@@ -7,27 +7,17 @@ from torch import nn
 from torch.utils.data import DataLoader
 import einops
 
-from model import GPT, GPTConfig
-from dataset import train_dataset, test_dataset, vocab_size
+from model import GPT
+from dataset import train_dataset, vocab_size
 
 torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 
-n_embd = 16
-n_heads = 2
-d_mlp = 32
-n_layers = 2
-vocab_size = vocab_size
-
-logging.info(f"GPT Configuration: n_embd={n_embd}, n_heads={n_heads}, d_mlp={d_mlp}, n_layers={n_layers}, vocab_size={vocab_size}")
-
-config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp, vocab_size=vocab_size)
-
-model = GPT(config=config).to(device)
+model_type = 'gpt2'
+model = GPT.from_pretrained(model_type).to(device)
 
 train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
 # 1. get a_l-1, use forward hook to save input to a layer l during the forward pass
 layer_inputs = {}
@@ -55,11 +45,11 @@ for name, module in model.named_modules():
         # TODO adjust for hf gpt2 impl
         linear_layers.append(module)
 
-# linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
+linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
 logging.info(f"MLP Linear layers: {len(linear_layers)}")
 
 def compute_ekfac_factors(model: nn.Module, train_dataset: DataLoader):
-    logging.info(f'Computing EKFAC factors for {model._get_name()} - Dataset len: {len(train_dataset.dataset)}')
+    logging.info(f'Computing EKFAC factors for {model._get_name()}')
     kfac_input_covs = []
     kfac_grad_covs = []
 
@@ -233,96 +223,6 @@ else:
     ihvp, ihvp_tokenwise  = compute_ihvp(kfac_input_covs, kfac_grad_covs, pseudo_grads, computed_grads)
     torch.save(ihvp, f'{model_name}_ihvp_{num_params}.pt')
     torch.save(ihvp_tokenwise, f'{model_name}_ihvp_tokenwise_{num_params}.pt')
-
-# above can be done once for model finetuned on specific dataset
-
-# 5. for each test point:
-# get gradient of test point wrt loss?
-# calculate influence with ihvp and test_grad
-# sample topk
-
-exit()
-
-topk = 5
-
-all_top_training_samples = []
-all_top_influences = []
-all_top_token_influences = []
-
-logging.info(f'Calculating influences for query data.')
-
-for query in test_dataloader:
-
-    grads = compute_grads(model, [query])
-    tokenwise_query_grads = grads
-
-    query_grad = torch.cat(
-        [q[0].view(-1) for q in grads]
-    )
-    top_influences = -1 * torch.einsum("ij,j->i", ihvp, query_grad)
-
-    layer_token_influences = []
-    seq_len = ihvp_tokenwise[-1].shape[-1]
-    for l, g in zip(ihvp_tokenwise, tokenwise_query_grads):
-        # some ihvp layer grads have more tokens, intermediate linear layers from mlp
-        # TODO what do we do
-        if l.shape[-1] == seq_len:
-            token_influence = torch.einsum("ijk,jk->ik", l, g[0])
-            layer_token_influences.append(token_influence)
-
-    token_influences = torch.sum(torch.stack(layer_token_influences), dim=0)
-
-    top_influences, top_samples = torch.topk(top_influences, topk)
-    all_top_training_samples.append(top_samples)
-    all_top_influences.append(top_influences)
-
-    top_token_influences = token_influences[top_samples]
-    all_top_token_influences.append(top_token_influences)
-
-def decode(token_ids):
-    try:
-        return "".join([chr(i) for i in token_ids])
-    except:
-        return chr(token_ids)
-
-# TODO ensure we are doing this per token when using real data 
-for i, (top_samples, top_influences, top_token_influences) in enumerate(
-        zip(all_top_training_samples, all_top_influences, all_top_token_influences)
-    ):
-        print(f"Query: {decode(test_dataset[i][0]['input_ids'])[0]}{decode(test_dataset[i][1]['input_ids'])}")
-        print(f"Top {topk} training samples and their influences:")
-        for s, i, tok_inf in zip(top_samples, top_influences, top_token_influences):
-            s = s.item()
-            sample = f"{decode(train_dataset[s][0]['input_ids'])[0]}{decode(train_dataset[s][1]['input_ids'])}"
-            print(
-                f"{sample} Influence: {i}"
-            )
-            for char, influence in zip(sample, tok_inf):
-                print(f"{char}, {influence}")
-
-# import json
-
-# data = []
-# for i, (top_samples, top_influences, top_token_influences) in enumerate(
-#         zip(all_top_training_samples, all_top_influences, all_top_token_influences)
-#     ):
-#     query = f"{decode(test_dataset[i][0]['input_ids'])[0]}{decode(test_dataset[i][1]['input_ids'])}"
-#     influences = []
-#     for s, i, tok_inf in zip(top_samples, top_influences, top_token_influences):
-#         s = s.item()
-#         sample = f"{decode(train_dataset[s][0]['input_ids'])[0]}{decode(train_dataset[s][1]['input_ids'])}"
-#         influences.append({
-#             'sample': sample,
-#             'influence': i.item(),
-#             'token_influence': tok_inf.tolist()
-#         })
-#     data.append({
-#         'query': query,
-#         'influences': influences
-#     })
-
-# with open('data.json', 'w') as f:
-#     json.dump(data, f)
 
 # TODO DUMP
 # 1. Finetune model on a dataset
