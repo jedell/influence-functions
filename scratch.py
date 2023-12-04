@@ -4,10 +4,10 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import einops
 
-from model import GPT, GPTConfig, MLP
+from model import GPT
 from dataset import train_dataset, test_dataset, tokenizer
 
 torch.manual_seed(0)
@@ -20,9 +20,7 @@ d_mlp = 32
 n_layers = 2
 vocab_size = 128
 
-config = GPTConfig(n_layer=n_layers, n_head=n_heads, n_embd=n_embd, block_size=d_mlp, vocab_size=128)
-
-model = GPT(config=config).to(device)
+model = GPT.from_pretrained("gpt2").to(device)
 
 train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
