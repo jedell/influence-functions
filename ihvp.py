@@ -1,5 +1,6 @@
 import os
 import logging
+import argparse
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 import torch
@@ -7,17 +8,25 @@ from torch import nn
 from torch.utils.data import DataLoader
 import einops
 
-from model import GPT
-from dataset import train_dataset, vocab_size
+from model import GPT, GPTConfig
+from dataset import OpenWebTextDataset, tokenizer, vocab_size
 
 torch.manual_seed(0)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 torch.cuda.empty_cache()
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--path", type=str, default='openwebtext', help="Path to the dataset")
+args = parser.parse_args()
+
+config = GPTConfig()
+
 model_type = 'gpt2'
 model = GPT.from_pretrained(model_type).to(device)
 
-train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
+logging.info(f"Vocab Size: {vocab_size}")
+train_dataset = OpenWebTextDataset('train', tokenizer, block_size=1024, path=args.path)
+train_dataloader = DataLoader(train_dataset, batch_size=1)
 
 # 1. get a_l-1, use forward hook to save input to a layer l during the forward pass
 layer_inputs = {}
@@ -234,3 +243,7 @@ else:
 
 # Figure out how to serve this
 # Free colab doesnt give enough compute to calculate ihvp
+
+# TODO Lets follow karpathy https://www.youtube.com/watch?v=kCc8FmEb1nY
+# train very small model on shakespeare dataset and serve that
+# much more doable as a tech demo.
