@@ -24,6 +24,11 @@ config = GPTConfig()
 model_type = 'gpt2'
 model = GPT.from_pretrained(model_type).to(device)
 
+for _, module in model.named_modules():
+    if isinstance(module, nn.Linear):
+        # grab linear layers everytime
+        print(module)
+
 logging.info(f"Vocab Size: {vocab_size}")
 train_dataset = OpenWebTextDataset('train', tokenizer, block_size=1024, path=args.path)
 train_dataloader = DataLoader(train_dataset, batch_size=1)
