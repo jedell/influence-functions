@@ -164,3 +164,7 @@ torch-influence
 nngeometry
 *.tex
 *.json
+TinyStories-ihvp-33000000.pt
+TinyStories
+*.pt
+.DS_Store

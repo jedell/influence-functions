@@ -117,7 +117,7 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
     return grads
 
 ihvp = torch.load(f'/content/TinyStories_ihvp_33000000.pt')
-train_dataset = TinyStoriesDataset('train', tokenizer, block_size=2048, path='roneneldan/TinyStories')
+train_dataset = TinyStoriesDataset('train', tokenizer, block_size=2048, path='/TinyStories')
 
 def get_influences(job):
     query = job['input']['prompt']
@@ -162,9 +162,6 @@ def get_influences(job):
             influence_sentences.append({"sample": sample, "influence": i.item()})
         top_influence_sentences.append(influence_sentences)
 
-    return {"top_influence_sentences": top_influence_sentences}
-
-
-    return
+    return {"influences": top_influence_sentences}
 
 runpod.serverless.start({"handler": get_influences})
