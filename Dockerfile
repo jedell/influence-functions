@@ -2,7 +2,9 @@ FROM runpod/base:0.4.0-cuda11.8.0
 
 # System dependencies
 COPY builder/setup.sh /setup.sh
-RUN /bin/bash /setup.sh && \
+ARG AWS_ACCESS_KEY_ID
+ARG AWS_SECRET_ACCESS_KEY
+RUN AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} /bin/bash /setup.sh && \
     rm /setup.sh
 
 # Python dependencies
@@ -12,7 +14,5 @@ RUN python3.11 -m pip install --upgrade pip && \
     rm /requirements.txt
 
 ADD src .
-
-COPY TinyStories-ihvp-1M.pt /TinyStories-ihvp-1M.pt
 
 CMD ["python", '-u', "/handler.py"]

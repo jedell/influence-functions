@@ -116,8 +116,9 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
 
     return grads
 
-ihvp = torch.load(f'/content/TinyStories_ihvp_33000000.pt')
-train_dataset = TinyStoriesDataset('train', tokenizer, block_size=2048, path='/TinyStories')
+ihvp = torch.load(f'/TinyStories-ihvp-1M.pt')
+# from hf
+train_dataset = TinyStoriesDataset('train', tokenizer, block_size=2048, path='roneneldan/TinyStories')
 
 def get_influences(job):
     query = job['input']['prompt']
