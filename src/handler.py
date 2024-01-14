@@ -4,6 +4,15 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
+import random
+from random import sample
+random.seed(42)
+
+def dataset_sample(dataset, n_samples):
+    indices = sample(range(len(dataset)), n_samples)
+    return [dataset[i] for i in indices]
+
+dataset_length = 10000
 
 class TinyStoriesDataset(Dataset):
     def __init__(self, split, tokenizer, path='roneneldan/TinyStories', block_size=1024, seed=42, take=10000, skip=0):
@@ -57,33 +66,44 @@ model.to(device)
 # 1. get a_l-1, use forward hook to save input to a layer l during the forward pass
 layer_inputs = {}
 
-def forward_hook_fn(module, input):
-    if isinstance(module, nn.Linear):
-        layer_inputs[module] = torch.cat([
+def get_a_l_minus_1(name):
+
+    def forward_hook_fn(module, input, output):
+        layer_inputs[name] = torch.cat([
                 input[0],
                 torch.ones((input[0].shape[0], input[0].shape[1], 1)).to(input[0].device),
         ], dim=-1).clone().detach()
+    return forward_hook_fn
 
 # 2. get grad_loss, gradients of loss wrt output of linear transformation W_l a_l-1
 #    using a backward hook on the linear layer that saves the gradient wrt the linear layer's output
 
 layer_grads = {}
 
-def back_hook_fn(module, grad_input, grad_output):
-    if isinstance(module, nn.Linear):
-        layer_grads[module] = grad_output[0].clone().detach()
+def get_grad_loss(name):
+    def back_hook_fn(module, grad_input, grad_output):
+        layer_grads[name] = grad_output[0].clone().detach()
+    return back_hook_fn
 
 linear_layers = []
+# specifc to GPT Neo
 for name, module in model.named_modules():
-    if isinstance(module, nn.Linear) and 'mlp' in name: # out_proj ???
-        # grab linear layers everytime
-        linear_layers.append(module)
-
-linear_layers = linear_layers[:-1]  # remove output token logits layer from calculations
+    # INPUT TO MLP (batch_size, seq_len, input_dim), a_l-1
+    if name.split('.')[-1] == 'mlp':
+      module.register_forward_hook(get_a_l_minus_1(f"{name}.c_fc"))
+      # linear_layers.append(module)
+    # FIRST LINEAR LAYER self.linear(a_l_minus_1) proj
+    # https://github.com/nrimsky/InfluenceFunctions/blob/72334413bde13cde66366d2e524f87f38d2adea2/mini_transformer.py#L98C1-L99C1
+    if isinstance(module, nn.Linear) and name.split('.')[-1] == 'c_fc':
+      module.register_full_backward_hook(get_grad_loss(name))
+      linear_layers.append((name, module))
+      layer_grads[name] = {}
+      layer_inputs[name] = {}
 
 def compute_grads(model: nn.Module, train_dataset: DataLoader):
 
     grads = [[] for _ in range(len(linear_layers))]
+    full_tokenwise_grads = [[] for _ in range(len(linear_layers))]
     for X, Y in train_dataset:
         model.zero_grad()
 
@@ -102,7 +122,8 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
         logits, loss = output['logits'], output['loss']
 
         loss.backward()
-        for i, module in enumerate(linear_layers):
+        for i, name_module in enumerate(linear_layers):
+            name, module = name_module
             w_grad = module.weight.grad
             if module.bias is not None:
                 b_grad = module.bias.grad.unsqueeze(-1)
@@ -112,13 +133,20 @@ def compute_grads(model: nn.Module, train_dataset: DataLoader):
                     [w_grad, torch.zeros([w_grad.shape[0], 1])],
                     dim=-1
                 )
+
+            d_s_l = layer_grads[name]
+            a_l_1 = layer_inputs[name]
+            tokenwise_grads = torch.einsum('bix,bjy->bixy', d_s_l, a_l_1)
+            full_tokenwise_grads[i].append(tokenwise_grads.squeeze(0))
+
             grads[i].append(full_grad)
 
-    return grads
+    return grads, full_tokenwise_grads
 
-ihvp = torch.load(f'/TinyStories-ihvp-1M.pt')
+ihvp = torch.load(f'/TinyStories-ihvp-f.pt')
 # from hf
-train_dataset = TinyStoriesDataset('train', tokenizer, block_size=2048, path='roneneldan/TinyStories')
+train_dataset_hf = TinyStoriesDataset('train', tokenizer, block_size=2048, path='roneneldan/TinyStories')
+train_dataset = dataset_sample(train_dataset_hf, dataset_length)
 
 def get_influences(job):
     query = job['input']['prompt']
@@ -139,10 +167,14 @@ def get_influences(job):
 
     for query, compl in z_m:
 
-        grads = compute_grads(model, [(query, compl)])
+        grads, token_grads = compute_grads(model, [(query, compl)])
 
         query_grad = torch.cat(
             [q[0].view(-1) for q in grads]
+        )
+        token_query_grads = torch.cat(
+            [tq[0].view(tq[0].shape[0], -1) for tq in token_grads],
+            dim=-1
         )
 
         # eq 30
@@ -152,17 +184,39 @@ def get_influences(job):
         all_top_training_samples.append(top_samples)
         all_top_influences.append(top_influences)
 
+        top_influence_tokenwise = []
+        for i, r_t in enumerate(token_query_grads):
+            top_influence_tokenwise.append(-1 * torch.einsum("ij,j->i", ihvp, r_t))
+
     top_influence_sentences = []
-    for i, (top_samples, top_influences) in enumerate(
+    for k, (top_samples, top_influences) in enumerate(
             zip(all_top_training_samples, all_top_influences)
         ):
         influence_sentences = []
         for s, i in zip(top_samples, top_influences):
             s = s.item()
-            sample = f"{tokenizer.decode(train_dataset[s][0]['input_ids'])}"
-            influence_sentences.append({"sample": sample, "influence": i.item()})
-        top_influence_sentences.append(influence_sentences)
+            query = tokenizer.decode(z_m[k][0]['input_ids']).replace("<|endoftext|>", "")
+            sample = tokenizer.decode(train_dataset[s][0]['input_ids'], skip_special_tokens=True).replace("<|endoftext|>", "")
 
+            tokenwise_influences = []
+            for v, r_t in enumerate(top_influence_tokenwise):
+                token_id = train_dataset[s][0]['input_ids'][v]
+                token = tokenizer.decode(token_id, skip_special_tokens=True)
+                influence = r_t[s].item()
+
+                tokenwise_influences.append({"token": token, "influence": influence})
+                # stop if encounter eot
+                if token_id.item() == 50256:
+                    break
+
+            influence_sentences.append({
+                "sample": sample,
+                "influence": i.item(),
+                "tokens": tokenwise_influences
+            })
+
+        top_influence_sentences.append({"samples": influence_sentences, "query": query})
+    
     return {"influences": top_influence_sentences}
 
 runpod.serverless.start({"handler": get_influences})
